@@ -1,0 +1,5 @@
+tldextract
+bs4
+chardet
+lxml
+requests

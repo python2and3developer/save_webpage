@@ -1,6 +1,10 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
+"""SAVE_WEBPAGE
+Save a webpage and all its resource.
+"""
+
 import os, sys, re, base64, urlparse, urllib2, urllib, datetime
 import argparse
 import urltools
@@ -13,6 +17,14 @@ from bs4 import BeautifulSoup
 import lxml
 import requests
 import tldextract
+
+__all__ = ['Webpage_Downloader']
+
+__version__ = '1.0'
+__license__ = 'The Star And Thank Author License (SATA)'
+__author__ = 'Miguel Martinez Lopez'
+__url__ = 'https://github.com/python2and3developer/save_webpage'
+__source__ = 'https://raw.github.com/python2and3developer/save_webpage/master/save_webpage.py'
 
 
 logger = logging.getLogger("website_downloader")
@@ -251,6 +263,7 @@ def handle_css_content(content, base_url, on_found_url_in_css):
         #     # dont handle font data uri currently
         #     return 'url(' + src + ')'
         url_path = urlparse.urlparse(src).path
+        url_path = url_path.lower()
 
         type_of_resource = None
 
@@ -295,10 +308,11 @@ def handle_css_content(content, base_url, on_found_url_in_css):
 
     return content
 
-
+# TODO: Process form actions
+# TODO: Provide the possibility to use a custom handler for extra processing the content of internal resources
 class Webpage_Downloader(object):
 
-    def __init__(self, domain, output=None, base_url=None, javascript_replacements=None, prettify=False, minify=True):
+    def __init__(self, domain, output=None, base_url=None, html_replacements=None, javascript_replacements=None):
         if output:
             if os.path.isabs(output):
                 self._output = output
@@ -310,14 +324,21 @@ class Webpage_Downloader(object):
         self._domain = domain
 
         self._base_url = base_url
-        self._prettify = prettify
         
+        self._html_replacements = html_replacements
         self._javascript_replacements = javascript_replacements
         
-        self.broken_urls = set([])
         
-    def _is_in_same_domain(self, url):
+        self.broken_urls = set([])
+
+    def _is_absolute_url_in_same_domain(self, url):
         return self._domain == tldextract.extract(url).domain
+
+    def _is_external_resource(self, url):
+        if is_absolute_url(url) and not self._is_absolute_url_in_same_domain(url):
+            return True
+        else:
+            return False
         
     def _local_url(self, url, base_url=None):
         if base_url is not None:
@@ -326,7 +347,7 @@ class Webpage_Downloader(object):
         url = normalize_url(url)
         parsed_url = urlparse.urlparse(url)
 
-        if not self._is_in_same_domain(url):
+        if not self._is_absolute_url_in_same_domain(url):
             return url
         
         relative_url = parsed_url.path
@@ -373,8 +394,11 @@ class Webpage_Downloader(object):
             
             if response_handler is not None:                    
                 try:
-                    content = response_handler(response)
-                    #content = on_found_url_in_css(content, possible_encoding)
+                    _content = response_handler(response)
+                    if _content:
+                        content = _content
+                    else:
+                        content = response.content
                 except:
                     os.remove(path_to_resource_file)
                     raise
@@ -386,8 +410,57 @@ class Webpage_Downloader(object):
 
         return relative_url
 
-    # Lo del URL require revision
-    # Modificar la variable output
+    def _on_found_url_in_css(self, internal_urls_in_css, type_of_resource, url, base_url):
+        if is_absolute_url(url):
+            if self._is_absolute_url_in_same_domain(url):
+                path_url1 = urlparse.urlparse(base_url).path
+                path_url2 = urlparse.urlparse(url).path
+
+                relative_url = relurl_path(path_url1, path_url2)                
+                absoute_url = url
+            else:
+                return url
+        else:
+            relative_url = url
+            absoute_url = absurl(base_url, url)
+
+        internal_urls_in_css.append((type_of_resource, absoute_url))
+            
+        return relative_url
+
+    def _create_response_css_handler(self, on_found_url_in_css):       
+        def response_css_handler(response):
+            encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
+
+            if encoding is None:
+                logger.info('[ WARN ] failed to found encoding: %s'%response.url)
+                return response.content
+            else:
+                base_url = response.url
+
+                css = response.content.decode(encoding, 'strict')
+                css = handle_css_content(css, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
+                css = css.encode("utf-8")
+
+                return css
+
+        return response_css_handler
+    
+    def _apply_replacements_to_text(self, text, replacements):
+        for old, new in replacements:
+            text.replace(old, new)
+        return text
+
+    def _response_js_handler(self, response):
+        if self._javascript_replacements:
+            encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
+            content = response.content.decode(encoding, 'strict')
+            
+            self._apply_replacements_to_text(content, self._javascript_replacements)
+            
+            content = content.encode("utf-8")
+            return content      
+
     def save(self, url):
         # It should return a list of links found in the html
         '''
@@ -420,32 +493,24 @@ class Webpage_Downloader(object):
 
         # now build the dom tree
         soup = BeautifulSoup(html, 'lxml')
-                
-        if self._javascript_replacements is None:
-            process_replacements= None
-        else:
-            def process_replacements(response):
 
-                encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
-                content = response.content.decode(encoding, 'strict')
-                
-                for old, new in self._javascript_replacements:
-                    content.replace(old, new)
-                
-                content = content.encode("utf-8")
-                return content        
+        logger.info("\nProcessing script's..")
 
         for js in soup('script'):
             if not js.get('src'): continue       
             src = js['src']
 
-            new_src = self._save_resource_if_not_exists(src, base_url=url, response_handler=process_replacements)
-            
+            new_src = self._save_resource_if_not_exists(src, base_url=url, response_handler=self._response_js_handler)
+
             js['src'] = new_src
+
+        logger.info("\nProcessing img's...")
 
         for img in soup('img'):
             if not img.get('src'): continue
             src = img['src']
+
+            if self._is_external_resource(src): continue
 
             new_src = self._save_resource_if_not_exists(src, base_url=url)
             
@@ -453,50 +518,20 @@ class Webpage_Downloader(object):
 
         current_path = urlparse.urlparse(url).path
 
+        logger.info("\nProcessing links...")
         for a in soup.find_all('a', href=True):
             href = a['href'].strip()
             if not href.startswith('#'):
-                if is_absolute_url(href) and self._is_in_same_domain(href):                        
-                    parsed_href = urlparse.urlparse(href)
-                    new_path = relurl_path(current_path, parsed_href.path)
-                    
-                    a['href'] = urlparse.urlunsplit(("", "", new_path, parsed_href.query, parsed_href.fragment))
+                if self._is_external_resource(href): continue
 
-        external_urls_in_css = []
-
-        def on_found_url_in_css(type_of_resource, external_url, base_url):
-            if is_absolute_url(external_url):
-                if self._is_in_same_domain(external_url):
-                    path_url1 = urlparse.urlparse(base_url).path
-                    path_url2 = urlparse.urlparse(external_url).path
-
-                    relative_external_url = relurl_path(path_url1, path_url2)                
-                    absoute_external_url = external_url
-                else:
-                    return external_url
-            else:
-                relative_external_url = external_url
-                absoute_external_url = absurl(base_url, external_url)
-
-            external_urls_in_css.append((type_of_resource, absoute_external_url))
+                parsed_href = urlparse.urlparse(href)
+                new_path = relurl_path(current_path, parsed_href.path)
                 
-            return relative_external_url
-        
-        def process_css_content_from_response(response):
-            encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
+                a['href'] = urlparse.urlunsplit(("", "", new_path, parsed_href.query, parsed_href.fragment))
 
-            if encoding is None:
-                logger.info('[ WARN ] failed to found encoding: %s'%response.url)
-                return response.content
-            else:
-                base_url = response.url
+        internal_urls_in_css = []
 
-                css = response.content.decode(encoding, 'strict')
-                css = handle_css_content(css, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
-                css = css.encode("utf-8")
-
-                return css
-
+        logger.info("\nProcessing link elements...")
         for link in soup('link'):
             if link.get('href'):
                 href = link['href']
@@ -507,8 +542,9 @@ class Webpage_Downloader(object):
                     local_url = self._local_url(href)
                     link['href'] = local_url
 
-                    if self._is_in_same_domain(href):
-                        external_urls_in_css.append((CSS_FILE, href))
+                    if self._is_external_resource(href): continue
+                    
+                    internal_urls_in_css.append((CSS_FILE, href))
                 else:
                     link['href'] = href
             else:
@@ -516,6 +552,10 @@ class Webpage_Downloader(object):
                     if link.string:
                         link.string = handle_css_content(link.string, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
 
+        on_found_url_in_css = functools.partial(self._on_found_url_in_css, internal_urls_in_css)
+        response_css_handler = self._create_response_css_handler(on_found_url_in_css)
+
+        logger.info("\nProcessing style elements...")
         for style in soup.find_all('style'):
             if style.string.strip():
                 style.string = handle_css_content(style.string, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
@@ -525,62 +565,53 @@ class Webpage_Downloader(object):
                 if tag['style']:
                     tag['style'] = handle_css_content(tag['style'], base_url=base_url, on_found_url_in_css=on_found_url_in_css)
 
-
-        while len(external_urls_in_css) != 0:
-            type_of_resource, external_url = external_urls_in_css.pop()
+        logger.info("\nProcessing internal resources found in stylesheets...")
+        while len(internal_urls_in_css) != 0:
+            type_of_resource, internal_url = internal_urls_in_css.pop()
 
             if type_of_resource == CSS_FILE:
-                self._save_resource_if_not_exists(external_url, response_handler=process_css_content_from_response)
+                self._save_resource_if_not_exists(internal_url, response_handler=response_css_handler)
             else:
-                self._save_resource_if_not_exists(external_url)
+                self._save_resource_if_not_exists(internal_url)
 
-        if self._prettify:
-            html = soup.prettify(formatter='html')
-        else:
-            html = str(soup)
-        
+        html = str(soup)
+        if self._html_replacements:
+            self._apply_replacements_to_text(html, self._html_replacements)
+
         with open(path_to_resource_file, "w") as f:
             f.write(html)
 
 
-def usage():
-    print("""
-usage:
-
-    $ save [options] some_url
-
-options:
-
-    -h, --help              help page, you are reading this now!
-    -q, --quite             don't show verbose url get log in stderr
-
-examples:
-
-    $ save -h
-        you are reading this help message
-
-    $ save http://www.google.com > google.html
-        save google url page for offline reading, keep style untainted
-
-    $ save http://gabrielecirulli.github.io/2048/ > 2048.html
-        save dynamic page with Javascript example
-        the 2048 game can be played offline after being saved
-
-    $ save /path/to/xxx.html > xxx_single.html
-        combine local saved xxx.html with a directory named xxx_files together into a single html file
-""")
-
-
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__, epilog="""save_webpage.py:
+    Takes a url and extracts that website with all its internal resource files.
+    Transforms all internal resources so that they link to local files.
+    Process css files exctracting new resource and converting url's.
+    Possibility to replace javascript and html files using custom substitutions.
+    Full Unicode/UTF-8 support.""")
+    parser.add_argument('--version', action='version', version=__version__)
     parser.add_argument('-q', '--quite', action='store_true', help="don't show verbose url get log in stderr")
-    parser.add_argument('-k', '--insecure', action='store_true', help="ignore the certificate")
+    parser.add_argument('--insecure', action='store_true', help="Ignore the certificate")
     parser.add_argument('-i', '--url-list', action='store', help="Path to file containing list of url's")
     parser.add_argument('-o', '--output', action='store', default=None, help="Output directory")
-    parser.add_argument('--replacements', action='store', default=None, help="Output directory")
-    parser.add_argument('-B', '--base-url', action='store', help="Resolves relative links using URL as the point of reference")
+    parser.add_argument('--javascript-replacements', action='store', default=None, help="Path to file containing javascript replacements in JSON format")
+    parser.add_argument('--html-replacements', action='store', default=None, help="Path to file containing html replacements in JSON format")
+    parser.add_argument('-b', '--base-url', action='store', help="Resolves relative links using URL as the point of reference")
     parser.add_argument("url", nargs='?', help="the website to store")
     args = parser.parse_args()
+
+    output = args.output
+    base_url = args.base_url
+    
+    javascript_replacements = args.javascript_replacements
+    if javascript_replacements:
+        with open(javascript_replacements) as f:
+            javascript_replacements = json.loads(f.read())
+    
+    html_replacements = args.javascript_replacements
+    if html_replacements:
+        with open(html_replacements) as f:
+            html_replacements = json.loads(f.read())
 
     if args.url_list:
         
@@ -591,8 +622,10 @@ def main():
             domain = tldextract.extract(url_list[0]).domain
             webpage_downloader = Webpage_Downloader(
                                 domain,
-                                args.output,
-                                base_url=args.base_url)
+                                output,
+                                javascript_replacements=javascript_replacements,
+                                html_replacements=html_replacements,
+                                base_url=base_url)
 
             for url in url_list:
                 webpage_downloader.save(url)
@@ -602,8 +635,10 @@ def main():
         
         webpage_downloader = Webpage_Downloader(
                     domain,
-                    args.output,
-                    base_url=args.base_url)
+                    output,
+                    javascript_replacements=javascript_replacements,
+                    html_replacements=html_replacements,
+                    base_url=base_url)
         webpage_downloader.save(args.url)
 
 if __name__ == '__main__':

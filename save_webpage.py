@@ -107,9 +107,14 @@ def relurl_path(path_url1, path_url2):
     return "/".join(rel_list)
 
 def absurl(base_url, url):
-    new = urlparse.urlparse(urlparse.urljoin(base_url, url))
+    parsed_url = urlparse.urlparse(urlparse.urljoin(base_url, url))
     # netloc contains basic auth, so do not use domain
-    return urlparse.urlunsplit((new.scheme, new.netloc, new.path, new.query, ''))
+    return urlparse.urlunsplit((
+                                parsed_url.scheme, 
+                                parsed_url.netloc, 
+                                parsed_url.path, 
+                                parsed_url.query, 
+                                parsed_url.fragment))
 
 def normalize_url(url):
     if url.startswith("//"):
@@ -312,24 +317,17 @@ def handle_css_content(content, base_url, on_found_url_in_css):
 # TODO: Provide the possibility to use a custom handler for extra processing the content of internal resources
 class Webpage_Downloader(object):
 
-    def __init__(self, domain, output=None, base_url=None, html_replacements=None, javascript_replacements=None):
+    def __init__(self, output=None):
         if output:
             if os.path.isabs(output):
                 self._output = output
             else:
                 self._output = os.path.join(os.getcwd(), output)
         else:
-            self._output = os.getcwd()
+            self._output = None
 
-        self._domain = domain
-
-        self._base_url = base_url
-        
-        self._html_replacements = html_replacements
-        self._javascript_replacements = javascript_replacements
-        
-        
         self.broken_urls = set([])
+        self._domain = None
 
     def _is_absolute_url_in_same_domain(self, url):
         return self._domain == tldextract.extract(url).domain
@@ -340,21 +338,18 @@ class Webpage_Downloader(object):
         else:
             return False
         
-    def _local_url(self, url, base_url=None):
-        if base_url is not None:
-            url = absurl(base_url, url)
+    def _to_relative_url(self, url):
+        """Transforms an absolute url to relative url"""
         
-        url = normalize_url(url)
-        parsed_url = urlparse.urlparse(url)
-
+        if not is_absolute_url(url):
+            return url
+        
         if not self._is_absolute_url_in_same_domain(url):
             return url
         
+        parsed_url = urlparse.urlparse(url)
+
         relative_url = parsed_url.path
-        
-        if self._base_url is not None:
-            relative_url = urlparse.urljoin(self._base_url, relative_url)
-            
         if relative_url.startswith("/"):
             relative_url = relative_url[1:]
         
@@ -366,12 +361,9 @@ class Webpage_Downloader(object):
         
         url = normalize_url(url)
 
-        relative_url = self._local_url(url)
+        relative_url = self._to_relative_url(url)
         
         relative_path_to_resource_file = urllib.url2pathname(relative_url)
-        if relative_path_to_resource_file.startswith("/"):
-            relative_path_to_resource_file = relative_path_to_resource_file[1:]
-
         path_to_resource_file = os.path.join(self._output, relative_path_to_resource_file)
 
         if os.path.isfile(path_to_resource_file):
@@ -451,43 +443,58 @@ class Webpage_Downloader(object):
             text.replace(old, new)
         return text
 
-    def _response_js_handler(self, response):
-        if self._javascript_replacements:
-            encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
-            content = response.content.decode(encoding, 'strict')
-            
-            self._apply_replacements_to_text(content, self._javascript_replacements)
-            
-            content = content.encode("utf-8")
-            return content      
+    def _response_js_handler(self, response, javascript_replacements):
+        encoding = detect_encoding_from_response(response)
+        content = response.content.decode(encoding, 'strict')
+        
+        content = self._apply_replacements_to_text(content, javascript_replacements)
+        
+        content = content.encode("utf-8")
+        return content      
 
-    def save(self, url):
+    def save(self, url, html_replacements=None, javascript_replacements=None):
         # It should return a list of links found in the html
         '''
         given a url url such as http://www.google.com, http://custom.domain/url.html
         return saved single html
         '''
+        
+        if not is_absolute_url(url):
+            raise Exception("URL is not absolute: %s"%url)
+
+        if self._domain is None:
+            self._domain = tldextract.extract(url).domain
+            if self._output is None:
+                self._output = os.path.join(os.getcwd(), urlparse.urlparse(url).netloc)
+        else:
+            if not self._is_absolute_url_in_same_domain(url):
+                raise Exception("URL not in the same domain: %s"%url)
 
         if os.path.exists(self._output):
             if not os.path.isdir(self._output):
-                raise Exception("It's not possible to create output file")
+                raise Exception("It's not possible to save webpage in 'output' directory")
         else:
             os.makedirs(self._output)
 
-        url_path = urlparse.urlparse(url).path
-        if url_path == "" or url_path == "/":
-            path_to_resource_file = os.path.join(self._output, "index.html")
-        else:
-            if url_path[0] == "/":
-                url_path = url_path[1:]
-            
-            relative_path_to_resource_file = os.path.join(*url_path.split("/"))
-            path_to_resource_file = os.path.join(self._output, relative_path_to_resource_file)
+        parsed_url = urlparse.urlparse(url)
+        
+        base_url_path = parsed_url.path
 
-        base_url = url
+        if base_url_path.endswith("/") or base_url_path == "":
+            base_url_path += "index.html"
+
+        if base_url_path.startswith("/"):
+            base_url_path = base_url_path[1:]
+
+        relative_path_to_html_file = os.path.join(*base_url_path.split("/"))
+        path_to_html_file = os.path.join(self._output, relative_path_to_html_file)
+
+        base_url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, base_url_path, "", "", ""))
+
         response = download_content(url)
 
-        if response is None: return
+        if response is None:
+            raise Exception("Not possible to download: %s"%url)
         
         html = response.content
 
@@ -496,13 +503,21 @@ class Webpage_Downloader(object):
 
         logger.info("\nProcessing script's..")
 
+        if javascript_replacements:
+            response_js_handler = functols.partial(self._response_js_handler, javascript_replacements=javascript_replacements)
+        else:
+            response_js_handler = None
+
         for js in soup('script'):
             if not js.get('src'): continue       
             src = js['src']
+            
+            if not self._is_external_resource(src):
+                relative_src = self._save_resource_if_not_exists(src, base_url=base_url, response_handler=response_js_handler)
+                
+                src = relurl_path(base_url_path, relative_src)
 
-            new_src = self._save_resource_if_not_exists(src, base_url=url, response_handler=self._response_js_handler)
-
-            js['src'] = new_src
+                js['src'] = src
 
         logger.info("\nProcessing img's...")
 
@@ -510,24 +525,29 @@ class Webpage_Downloader(object):
             if not img.get('src'): continue
             src = img['src']
 
-            if self._is_external_resource(src): continue
+            if not self._is_external_resource(src):
+                relative_src = self._save_resource_if_not_exists(src, base_url=base_url)
+                src = relurl_path(base_url_path, relative_src)
 
-            new_src = self._save_resource_if_not_exists(src, base_url=url)
-            
-            img['src'] = new_src
+                img['src'] = src
 
         current_path = urlparse.urlparse(url).path
 
         logger.info("\nProcessing links...")
         for a in soup.find_all('a', href=True):
             href = a['href'].strip()
-            if not href.startswith('#'):
-                if self._is_external_resource(href): continue
 
-                parsed_href = urlparse.urlparse(href)
-                new_path = relurl_path(current_path, parsed_href.path)
-                
-                a['href'] = urlparse.urlunsplit(("", "", new_path, parsed_href.query, parsed_href.fragment))
+            if not href.startswith('#'):
+                href = absurl(base_url, href)
+                href = normalize_url(href)
+
+                if self._is_external_resource(href):
+                    a['href'] = href
+                else:
+                    parsed_href = urlparse.urlparse(href)
+                    new_href_path = relurl_path(base_url_path, parsed_href.path)
+                    
+                    a['href'] = urlparse.urlunsplit(("", "", new_href_path, parsed_href.query, parsed_href.fragment))
 
         internal_urls_in_css = []
 
@@ -535,18 +555,21 @@ class Webpage_Downloader(object):
         for link in soup('link'):
             if link.get('href'):
                 href = link['href']
+                
                 href = absurl(base_url, href)
+                href = normalize_url(href)
 
-                if (link.get('type') == 'text/css' or link['href'].lower().endswith('.css') or 'stylesheet' in (link.get('rel') or [])):
-
-                    local_url = self._local_url(href)
-                    link['href'] = local_url
-
-                    if self._is_external_resource(href): continue
-                    
-                    internal_urls_in_css.append((CSS_FILE, href))
-                else:
+                if self._is_external_resource(href):
                     link['href'] = href
+                else:
+                    if (link.get('type') == 'text/css' or link['href'].lower().endswith('.css') or 'stylesheet' in (link.get('rel') or [])):
+                        internal_urls_in_css.append((CSS_FILE, href))
+
+                    relative_href = self._to_relative_url(href)
+                    href = relurl_path(base_url_path, relative_href)
+
+                    link['href'] = href
+
             else:
                 if link.has_attr('type') and link['type'] == 'text/css':
                     if link.string:
@@ -575,10 +598,10 @@ class Webpage_Downloader(object):
                 self._save_resource_if_not_exists(internal_url)
 
         html = str(soup)
-        if self._html_replacements:
-            self._apply_replacements_to_text(html, self._html_replacements)
+        if html_replacements:
+            self._apply_replacements_to_text(html, html_replacements)
 
-        with open(path_to_resource_file, "w") as f:
+        with open(path_to_html_file, "w") as f:
             f.write(html)
 
 
@@ -608,7 +631,7 @@ def main():
         with open(javascript_replacements) as f:
             javascript_replacements = json.loads(f.read())
     
-    html_replacements = args.javascript_replacements
+    html_replacements = args.html_replacements
     if html_replacements:
         with open(html_replacements) as f:
             html_replacements = json.loads(f.read())
@@ -619,27 +642,20 @@ def main():
             url_list = [l for l in f.read().splitlines() if l.strip() != ""]
 
         if len(url_list) != 0:
-            domain = tldextract.extract(url_list[0]).domain
-            webpage_downloader = Webpage_Downloader(
-                                domain,
-                                output,
-                                javascript_replacements=javascript_replacements,
-                                html_replacements=html_replacements,
-                                base_url=base_url)
+            webpage_downloader = Webpage_Downloader(output=output)
 
             for url in url_list:
-                webpage_downloader.save(url)
+                webpage_downloader.save(
+                                url, 
+                                javascript_replacements=javascript_replacements,
+                                html_replacements=html_replacements)
             
     else:
-        domain = tldextract.extract(args.url).domain
-        
-        webpage_downloader = Webpage_Downloader(
-                    domain,
-                    output,
-                    javascript_replacements=javascript_replacements,
-                    html_replacements=html_replacements,
-                    base_url=base_url)
-        webpage_downloader.save(args.url)
+        webpage_downloader = Webpage_Downloader(output=output)
+        webpage_downloader.save(
+                args.url, 
+                javascript_replacements=javascript_replacements,
+                html_replacements=html_replacements)
 
 if __name__ == '__main__':
     main()

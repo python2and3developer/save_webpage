@@ -46,10 +46,12 @@ Examples:
 $ python save_webpage.py -h
     you are reading this help message
 
-$ python save_webpage.py http://www.google.com > google.html
+$ python save_webpage.py http://www.google.com
     save google url page for offline reading, keep style untainted
+    the website and all its resource are saved in the 'output' folder
 
-$ python save_webpage.py http://gabrielecirulli.github.io/2048/ > 2048.html
+$ python save_webpage.py http://gabrielecirulli.github.io/2048/ --output game
     save dynamic page with Javascript example
     the 2048 game can be played offline after being saved
+    the website and all its resource are saved in the 'game' folder
 ```

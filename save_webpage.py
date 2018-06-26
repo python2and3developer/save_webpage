@@ -1,16 +1,24 @@
 #!/usr/bin/env python2
 # -*- coding: utf-8 -*-
 
-"""SAVE_WEBPAGE
-Save a webpage and all its resource.
+"""Save_Webpage
+Save webpages and all its resources. Apply search and replace of matched strings.
 """
 
-import os, sys, re, base64, urlparse, urllib2, urllib, datetime
+import os
+import sys
+import re
+import base64
+import urlparse
+import urllib2
+import urllib
+import json
 import argparse
 import urltools
 import functools
 import logging
 import codecs
+import datetime
 
 import chardet
 from bs4 import BeautifulSoup
@@ -18,16 +26,16 @@ import lxml
 import requests
 import tldextract
 
-__all__ = ['Webpage_Downloader']
+__all__ = ['Save_Webpage']
 
-__version__ = '1.0'
+__version__ = '2.0'
 __license__ = 'The Star And Thank Author License (SATA)'
 __author__ = 'Miguel Martinez Lopez'
 __url__ = 'https://github.com/python2and3developer/save_webpage'
 __source__ = 'https://raw.github.com/python2and3developer/save_webpage/master/save_webpage.py'
 
 
-logger = logging.getLogger("website_downloader")
+logger = logging.getLogger("Save_Webpage")
 formatter = logging.Formatter('%(message)s')
 syslog = logging.StreamHandler()
 syslog.setFormatter(formatter)
@@ -36,9 +44,13 @@ logger.setLevel(logging.DEBUG)
 
 HTML_FILE = 0
 CSS_FILE = 1
-FONT_FILE = 2
-IMAGE_FILE = 3 
-JS_FILE = 4
+IMAGE_FILE = 2
+AUDIO_FILE = 3
+VIDEO_FILE = 4
+FONT_FILE = 5
+JS_FILE = 6
+XML_FILE = 7
+OTHER_RESOURCE = 8
 
 CSS_URL_RE = re.compile('url\s*\((.+?)\)', re.I)
 
@@ -49,17 +61,84 @@ HTML5_CHARSET_RE = re.compile('<\s*meta[^>]+charset\s*=\s*["\']?([^>]*?)[ /;\'">
 XHTML_ENCODING_RE = re.compile('^<\?.*encoding=[\'"](.*?)[\'"].*\?>'.encode(), re.I)
 CSS_CHARSET_RE = re.compile(r'''@charset\s+["']([-_a-zA-Z0-9]+)["']\;''', re.I)
 
+# https://stackoverflow.com/questions/2725156/complete-list-of-html-tag-attributes-which-have-a-url-value
+
+TAGS_ATTRS_WITH_URLS = {
+    'a'            : [ 'href', 'urn' ],
+    'base'         : [ 'href' ],
+    'form'         : [ 'action', 'data' ],
+    'img'          : [ 'src', 'usemap', 'longdesc', 'dynsrc', 'lowsrc', 'srcset' ],
+    'amp-img'      : [ 'src', 'srcset' ],
+    'link'         : [ 'href' ],
+
+    'applet'       : [ 'code', 'codebase', 'archive', 'object' ],
+    'area'         : [ 'href' ],
+    'body'         : [ 'background', 'credits', 'instructions', 'logo' ],
+    'input'        : [ 'src', 'usemap', 'dynsrc', 'lowsrc', 'action', 'formaction' ],
+
+    'blockquote'   : [ 'cite' ],
+    'del'          : [ 'cite' ],
+    'frame'        : [ 'longdesc', 'src' ],
+    'head'         : [ 'profile' ],
+    'iframe'       : [ 'longdesc', 'src' ],
+    'ins'          : [ 'cite' ],
+    'object'       : [ 'archive', 'classid', 'codebase', 'data', 'usemap' ],
+    'q'            : [ 'cite' ],
+    'script'       : [ 'src' ],
+
+    'audio'        : [ 'src' ],
+    'command'      : [ 'icon' ],
+    'embed'        : [ 'src', 'code', 'pluginspage' ],
+    'event-source' : [ 'src' ],
+    'html'         : [ 'manifest', 'background', 'xmlns' ],
+    'source'       : [ 'src' ],
+    'video'        : [ 'src', 'poster' ],
+
+    'bgsound'      : [ 'src' ],
+    'div'          : [ 'href', 'src' ],
+    'ilayer'       : [ 'src' ],
+    'table'        : [ 'background' ],
+    'td'           : [ 'background' ],
+    'th'           : [ 'background' ],
+    'layer'        : [ 'src' ],
+    'xml'          : [ 'src' ],
+
+    'button'       : [ 'action', 'formaction' ],
+    'datalist'     : [ 'data' ],
+    'select'       : [ 'data' ],
+
+    'access'       : [ 'path' ],
+    'card'         : [ 'onenterforward', 'onenterbackward', 'ontimer' ],
+    'go'           : [ 'href' ],
+    'option'       : [ 'onpick' ],
+    'template'     : [ 'onenterforward', 'onenterbackward', 'ontimer' ],
+    'wml'          : [ 'xmlns' ]
+}
+
+
+ATTRS_WITH_EXTERNAL_RESOURCES = {
+    ("a", "href"): HTML_FILE,
+    ("script", "src"): JS_FILE,
+    ("img", "src"): IMAGE_FILE,
+    ("frame", "src"): HTML_FILE,
+    ("iframe", "src"): HTML_FILE,
+    ("audio", "src"): AUDIO_FILE,
+    ("bgsound", "src"): AUDIO_FILE,
+    ("video", "src"): VIDEO_FILE
+}
+
+
 def is_absolute_url(url):
     return bool(urlparse.urlparse(url).netloc)
 
 def is_absolute_url2(url):
     return re.match(r"""^                    # At the start of the string, ...
-                       (?!                  # check if next characters are not...
+                       (?:                  # check if next characters are ...
                           www\.             # URLs starting with www.
                          |
                           (?:http|ftp)s?:// # URLs starting with http, https, ftp, ftps
                          |
-                          [A-Za-z]:\\       # Local full paths starting with [drive_letter]:\  
+                          [A-Za-z]:\\       # Local full paths starting with [drive_letter]:\
                          |
                           //                # UNC locations starting with //
                        )                    # End of look-ahead check
@@ -67,13 +146,12 @@ def is_absolute_url2(url):
 
 
 def relurl_path(path_url1, path_url2):
-    
     if path_url1 != "" and path_url1[0] == "/":
         path_url1 = path_url1[1:]
-    
+
     if path_url2 != "" and path_url2[0] == "/":
         path_url2 = path_url2[1:]
-        
+
     if path_url1 == "":
         if path_url2 == "":
             return "/"
@@ -83,7 +161,7 @@ def relurl_path(path_url1, path_url2):
     if path_url2 == "":
         depth = path_url2.count("/")
         if depth == 0:
-            return "/"            
+            return "/"
         else:
             return "../"*depth
 
@@ -93,11 +171,11 @@ def relurl_path(path_url1, path_url2):
 
     i = 0
     l = min(len(url_parts1)-1, len(url_parts2)-1)
-    
+
     while True:
         if url_parts1[i] != url_parts2[i]:
             break
-        
+
         if i == l:
             break
         else:
@@ -106,24 +184,28 @@ def relurl_path(path_url1, path_url2):
     rel_list = [".."] * (len(url_parts1)-i-1) + url_parts2[i:]
     return "/".join(rel_list)
 
+
+def is_subpath(path, parent):
+    '''
+    Returns True if *path* points to the same or a subpath of *parent*.
+    '''
+
+    try:
+        relpath = os.path.relpath(path, parent)
+    except ValueError:
+        return False  # happens on Windows if drive letters don't match
+    return relpath == os.curdir or not relpath.startswith(os.pardir)
+
+
 def absurl(base_url, url):
     parsed_url = urlparse.urlparse(urlparse.urljoin(base_url, url))
     # netloc contains basic auth, so do not use domain
     return urlparse.urlunsplit((
-                                parsed_url.scheme, 
-                                parsed_url.netloc, 
-                                parsed_url.path, 
-                                parsed_url.query, 
+                                parsed_url.scheme,
+                                parsed_url.netloc,
+                                parsed_url.path,
+                                parsed_url.query,
                                 parsed_url.fragment))
-
-def normalize_url(url):
-    if url.startswith("//"):
-        url = "http:" + url
-
-    url = urllib.quote(url, safe="%/:=&?~#+!$,;'@()*[]")
-    url = urltools.normalize(url)
-    
-    return url
 
 def normalize_codec_name(name):
     '''Return the Python name of the encoder/decoder
@@ -164,7 +246,8 @@ def try_decoding(data, encoding):
     else:
         return True
 
-def detect_encoding_from_response(response, filetype=None):
+
+def detect_encoding_from_http_response(response, filetype=None, search_entire_document=True):
     '''Return the likely encoding of the response document.
 
     Args:
@@ -177,7 +260,7 @@ def detect_encoding_from_response(response, filetype=None):
     '''
 
     content_type = response.headers.get('content-type', '')
-    
+
     # Parse a "Content-Type" string for the document encoding
     http_match = HTTP_CHARSET_RE.search(content_type)
 
@@ -187,16 +270,16 @@ def detect_encoding_from_response(response, filetype=None):
         http_charset = None
 
     content = response.content
-    
+
     if filetype == HTML_FILE:
         if search_entire_document:
-            xml_endpos = html_endpos = len(content)
+            xhtml_endpos = html_endpos = len(content)
         else:
-            xml_endpos = 1024
+            xhtml_endpos = 1024
             html_endpos = max(2048, int(len(content) * 0.05))
 
         html_encoding = None
-        html_encoding_match = XHTML_ENCODING_RE.search(content, endpos=xml_endpos)
+        html_encoding_match = XHTML_ENCODING_RE.search(content, endpos=xhtml_endpos)
 
         if not html_encoding_match:
             html_encoding_match = HTML5_CHARSET_RE.search(content, endpos=html_endpos)
@@ -207,31 +290,31 @@ def detect_encoding_from_response(response, filetype=None):
         if html_encoding is not None:
             html_encoding = normalize_codec_name(html_encoding)
 
-            if try_decoding(raw_data, html_encoding):
+            if try_decoding(content, html_encoding):
                 return html_encoding
             else:
                 return None
 
-        return None
     elif filetype == CSS_FILE:
         css_encoding_match = CSS_CHARSET_RE.search(content)
         if css_encoding_match:
-            css_encoding = css_encoding_match.group(1)
-            css_encoding = normalize_codec_name(css_encoding)
+            encoding = css_encoding_match.group(1)
+            encoding = normalize_codec_name(encoding)
 
-            if try_decoding(content, css_encoding):
-                return css_encoding
+            if try_decoding(content, encoding):
+                return encoding
             else:
                 return None
 
     detected_encoding = chardet.detect(content)
-    
+
     if detected_encoding["confidence"] > CONFIDENCE_THRESOLD:
         return detected_encoding["encoding"]
     else:
         logger.info('[ ENCODING NOT DETECTED ] encoding: %s, thresold: %s, url: %s' % (detected_encoding["encoding"], detected_encoding["confidence"], response.url))
 
     return http_charset
+
 
 def download_content(url):
     headers = {
@@ -245,14 +328,53 @@ def download_content(url):
             response = None
         # elif response.headers.get('content-type', '').lower().startswith('text/'):
         #     content = response.text
-        
+
     except Exception as ex:
         logger.warning('[ DOWNLOAD ERROR ] %s - %s %s' % ('???', url, ex))
         response = None
 
     return response
 
-def handle_css_content(content, base_url, on_found_url_in_css):
+
+def resource_type_using_extension(url):
+    url_path = urlparse.urlparse(url).path
+    url_path = url_path.lower()
+
+    if url_path.endswith('.html') or url_path.endswith('.htm'):
+        return HTML_FILE
+    elif url_path.endswith('.js'):
+        return JS_FILE
+    elif url_path.endswith('.css'):
+        return CSS_FILE
+    elif url_path.endswith('.png'):
+        return IMAGE_FILE
+    elif url_path.endswith('.gif'):
+        return IMAGE_FILE
+    elif url_path.endswith('.jpg') or url_path.endswith('.jpeg'):
+        return IMAGE_FILE
+    elif url_path.endswith('.svg'):
+        return IMAGE_FILE
+    elif url_path.endswith('.cur'):
+        return IMAGE_FILE
+    elif url_path.endswith('.ico'):
+        return IMAGE_FILE
+    elif url_path.endswith('.ttf'):
+        return FONT_FILE
+    elif url_path.endswith('.otf'):
+        return FONT_FILE
+    elif url_path.endswith('.woff'):
+        return FONT_FILE
+    elif url_path.endswith('.woff2'):
+        return FONT_FILE
+    elif url_path.endswith('.eot'):
+        return FONT_FILE
+    elif url_path.endswith('.sfnt'):
+        return FONT_FILE
+    else:
+        return None
+
+
+def process_urls_in_css_content(content, url_handler, replace=True):
     # Watch out! how to handle urls which contain parentheses inside? Oh god, css does not support such kind of urls
     # I tested such url in css, and, unfortunately, the css rule is broken. LOL!
     # I have to say that, CSS is awesome!
@@ -260,74 +382,198 @@ def handle_css_content(content, base_url, on_found_url_in_css):
     def replace(matchobj):
         matched_data = matchobj.group(1)
         src = matched_data.strip(' \'"')
-        
+
         if src.startswith("data:"):
             return matched_data
 
         # if src.lower().endswith('woff') or src.lower().endswith('ttf') or src.lower().endswith('otf') or src.lower().endswith('eot'):
         #     # dont handle font data uri currently
         #     return 'url(' + src + ')'
-        url_path = urlparse.urlparse(src).path
-        url_path = url_path.lower()
 
-        type_of_resource = None
+        type_of_resource = resource_type_using_extension(src)
 
-        if url_path.endswith('.css'):
-            type_of_resource = CSS_FILE
-        elif url_path.endswith('.png'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.gif'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.jpg') or url_path.endswith('.jpeg'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.svg'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.cur'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.ico'):
-            type_of_resource = IMAGE_FILE
-        elif url_path.endswith('.ttf'):
-            type_of_resource = FONT_FILE
-        elif url_path.endswith('.otf'):
-            type_of_resource = FONT_FILE
-        elif url_path.endswith('.woff'):
-            type_of_resource = FONT_FILE
-        elif url_path.endswith('.woff2'):
-            type_of_resource = FONT_FILE
-        elif url_path.endswith('.eot'):
-            type_of_resource = FONT_FILE
-        elif url_path.endswith('.sfnt'):
-            type_of_resource = FONT_FILE
-        else:
+        if type_of_resource == None:
             logger.warn("Unknown resource "+ matched_data)
             return 'url('+matched_data+')'
-
-        new_src = on_found_url_in_css(type_of_resource, src, base_url=base_url)
-
-        if new_src:
-            return 'url('+ new_src + ')'
         else:
-            return 'url(' + matched_data + ')'
+            new_src = url_handler(type_of_resource, src)
+
+            if new_src:
+                return 'url('+ new_src + ')'
+            else:
+                return 'url(' + matched_data + ')'
 
     content = CSS_URL_RE.sub(replace, content)
 
     return content
 
+
+def process_urls_in_html_content(content, url_handler, replace=True):
+    # now build the dom tree
+    soup = BeautifulSoup(content, "html5lib")
+
+    for tag_name, attrs in TAGS_ATTRS_WITH_URLS.items():
+        list_of_tags = soup.find_all(tag_name)
+
+        number_of_tags = len(list_of_tags)
+        if number_of_tags == 0: continue
+
+        logger.info("\nProcessing %d %s's.."%(number_of_tags, tag_name))
+
+        if tag_name == "link":
+            for link in list_of_tags:
+                if not link.get('href'): continue
+
+                href = link['href']
+
+                if (link.get('type') == 'text/css' or link['href'].lower().endswith('.css') or 'stylesheet' in (link.get('rel') or [])):
+                    href = url_handler(CSS_FILE, href)
+                else:
+                    href = url_handler(OTHER_RESOURCE, href)
+
+                if href:
+                    link['href'] = href
+        elif tag_name == "style":
+            for style in list_of_tags:
+                if style.string.strip():
+                    style.string = process_urls_in_css_content(style.string, url_handler=url_handler)
+
+        else:
+            for tag in list_of_tags:
+                for attribute_name in attrs:
+                    if tag.has_attr(attribute_name):
+
+                        if (tag_name, attribute_name) in ATTRS_WITH_EXTERNAL_RESOURCES:
+                            type_of_resource = ATTRS_WITH_EXTERNAL_RESOURCES[tag_name, attribute_name]
+                        else:
+                            type_of_resource = OTHER_RESOURCE
+
+                        # srcset is a fair bit different from most html
+                        # attributes, so it gets it's own processsing
+                        if attribute_name == 'srcset':
+                            srcset = tag[attribute_name]
+
+                            list_of_new_urls_and_descriptors = []
+                            is_srcset_modified = False
+
+
+                            for url_and_descriptor in srcset.split(","):
+                                # remove the (optional) descriptor
+                                # https://developer.mozilla.org/en-US/docs/Web/HTML/Element/img#attr-srcset
+                                url_and_descriptor = url_and_descriptor.strip()
+
+                                match = re.search(r'\s+[\d\.]+[xw]\s*$', url_and_descriptor)
+
+                                if match:
+                                    descriptor = match.group(0)
+                                    url = url_and_descriptor[:match.start()]
+                                else:
+                                    descriptor = ""
+                                    url = url_and_descriptor
+
+                                new_url = url_handler(type_of_resource, url)
+                                if new_url:
+                                    list_of_new_urls_and_descriptors.append(new_url + descriptor)
+                                    is_srcset_modified = True
+                                else:
+                                    list_of_new_urls_and_descriptors.append(url + descriptor)
+
+                            if is_srcset_modified:
+                                tag["srcset"] = ",".join(list_of_new_urls_and_descriptors)
+                        else:
+
+                            url = tag[attribute_name]
+                            url = url_handler(type_of_resource, url)
+
+                            if url:
+                                tag[attribute_name] = url
+
+    for tag in soup(True):
+        if tag.has_attr('style'):
+            style = tag['style'].strip()
+
+            if style:
+                tag['style'] = process_urls_in_css_content(style, url_handler=url_handler)
+
+    return unicode(soup)
+
+
+def empty_file(file_path):
+    dirname = os.path.dirname(file_path)
+    if not os.path.isdir(dirname):
+        os.makedirs(dirname)
+
+    open(file_path, 'w').close()
+
+
 # TODO: Process form actions
 # TODO: Provide the possibility to use a custom handler for extra processing the content of internal resources
-class Webpage_Downloader(object):
+class Save_Webpage(object):
+    RELATIVE_MODE = 0
+    ABSOLUTE_MODE = 1
+    NO_CHANGE_MODE = 2
 
-    def __init__(self, output=None):
-        if output:
-            if os.path.isabs(output):
-                self._output = output
-            else:
-                self._output = os.path.join(os.getcwd(), output)
+
+    def __init__(self, list_of_seed_urls, forbidden_urls=None, follow_links=False, replacements=None, domain=None, output=None, base_url=None, mode=NO_CHANGE_MODE, default_file="index.html"):
+        if not list_of_seed_urls:
+            raise Exception("List of seed url's can't be empty")
+
+        self._list_of_seed_urls = list_of_seed_urls
+
+        self._broken_urls = set([])
+
+        self._queue = []
+
+        for url in list_of_seed_urls:
+            if not is_absolute_url(url):
+                raise Exception("Seed URL is not absolute: %s"%url)
+
+            url = self._normalize_url(url, default_file=default_file)
+            path_to_resource_file = self._path_to_resource_file(url, output=output)
+
+            empty_file(path_to_resource_file)
+
+            self._queue.append((HTML_FILE, url))
+
+
+        if domain is None:
+            url = list_of_seed_urls[0]
+            domain = tldextract.extract(url).domain
+
+        self._domain = domain
+
+        if output is None:
+            url = list_of_seed_urls[0]
+            output = os.path.join(os.getcwd(), urlparse.urlparse(url).netloc)
         else:
-            self._output = None
+            if not os.path.isabs(output):
+                output = os.path.join(os.getcwd(), output)
 
-        self.broken_urls = set([])
-        self._domain = None
+        self._output = output
+
+        if forbidden_urls:
+            forbidden_urls = [normalize_url(url) for url in forbidden_urls]
+
+        self._forbidden_urls = forbidden_urls
+        self._follow_links = follow_links
+
+        if mode != self.RELATIVE_MODE \
+            and mode != self.ABSOLUTE_MODE \
+            and mode != self.NO_CHANGE_MODE:
+            raise Exception("Invalid mode")
+
+        self._mode = mode
+
+        if base_url:
+            if not (base_url.startswith("http://") or base_url.startswith("https://")):
+                raise Exception("Base URL requires the protocol")
+        else:
+            if mode == self.ABSOLUTE_MODE:
+                raise Exception("Base URL is require to convert all url's to absolute")
+
+        self._base_url = base_url
+        self._default_file = default_file
+        self._replacements = replacements
 
     def _is_absolute_url_in_same_domain(self, url):
         return self._domain == tldextract.extract(url).domain
@@ -337,272 +583,194 @@ class Webpage_Downloader(object):
             return True
         else:
             return False
-        
-    def _to_relative_url(self, url):
-        """Transforms an absolute url to relative url"""
-        
-        if not is_absolute_url(url):
-            return url
-        
-        if not self._is_absolute_url_in_same_domain(url):
-            return url
-        
+
+    # Esta parte require revision
+    @staticmethod
+    def _normalize_url(url, default_file="index.html"):
+        if url.startswith("//"):
+            url = "http:" + url
+
         parsed_url = urlparse.urlparse(url)
 
-        relative_url = parsed_url.path
-        if relative_url.startswith("/"):
-            relative_url = relative_url[1:]
-        
-        return relative_url
+        if parsed_url.path.endswith("/") or parsed_url.path == "":
+            url_path = parsed_url.path + default_file
+        else:
+            url_path = parsed_url.path
 
-    def _save_resource_if_not_exists(self, url, base_url=None, response_handler=None):
+        url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, url_path, "", "", ""))
+
+        url = urllib.quote(url, safe="%/:=&?~#+!$,;'@()*[]")
+        url = urltools.normalize(url)
+
+        return url
+
+    @staticmethod
+    def _path_to_resource_file(url, output):
+        parsed_url = urlparse.urlparse(url)
+        url_path = parsed_url.path
+
+        if url_path.startswith("/"):
+            url_path = url_path[1:]
+
+        relative_path_to_resource_file = urllib.url2pathname(url_path)
+        path_to_resource_file = os.path.join(output, relative_path_to_resource_file)
+
+        return path_to_resource_file
+
+    def _replace_content(self, current_url, content):
+        if not self._replacements: return content
+
+        url_path = urlparse.urlparse(current_url).path
+
+        for pattern_url_path, list_of_replacement_objs in self._replacements:
+            is_url_matched = re.match(pattern_url_path, url_path)
+            if is_url_matched:
+                for replacement_obj in list_of_replacement_objs:
+                    if callable(replacement_obj):
+                        content = replacement_obj(content)
+                    else:
+                        pattern_text, substitution = replacement_obj
+                        content = re.sub(pattern_text, substitution, content)
+                break
+
+        return content
+
+    def _on_extracted_url(self, type_of_resource, url, base_url):
+        if type_of_resource == HTML_FILE and not self._follow_links: return
+
+        original_url = url
+
         if base_url is not None:
             url = absurl(base_url, url)
-        
-        url = normalize_url(url)
 
-        relative_url = self._to_relative_url(url)
-        
-        relative_path_to_resource_file = urllib.url2pathname(relative_url)
-        path_to_resource_file = os.path.join(self._output, relative_path_to_resource_file)
+        url = self._normalize_url(url, default_file=self._default_file)
+
+        if self._is_external_resource(url): return
+        if self._forbidden_urls and url in self._forbidden_urls: return
+
+        if url in self._broken_urls:
+            logger.info('[ BROKEN URL ] - %s' % url)
+            return
+
+
+        path_to_resource_file = self._path_to_resource_file(url, output=self._output)
 
         if os.path.isfile(path_to_resource_file):
             logger.info('[ CACHE HIT ] - %s' % url)
-        elif url in self.broken_urls:
-            logger.info('[ BROKEN URL ] - %s' % url)
-        else:
-            response = download_content(url)
+            return
 
-            if response is None:
-                logger.info('[ BROKEN URL ] - %s' % url)
-                self.broken_urls.add(url)
-                return relative_url
-            
-            dirname = os.path.dirname(path_to_resource_file)
-            if not os.path.isdir(dirname):
-                os.makedirs(dirname)
-                
-            open(path_to_resource_file, 'w').close()
-            
-            if response_handler is not None:                    
-                try:
-                    _content = response_handler(response)
-                    if _content:
-                        content = _content
-                    else:
-                        content = response.content
-                except:
-                    os.remove(path_to_resource_file)
-                    raise
+        empty_file(path_to_resource_file)
+
+        self._queue.append((type_of_resource, url))
+
+        if self._mode == self.ABSOLUTE_MODE:
+            if is_absolute_url2(original_url):
+                parsed_original_url = urlparse.urlparse(original_url)
+
+                url = urlparse.urljoin(self._base_url,
+                                       urlparse.urlunparse((
+                                                           "",
+                                                           "",
+                                                           parsed_original_url.path,
+                                                           parsed_original_url.params,
+                                                           parsed_original_url.query,
+                                                           parsed_original_url.fragment))
+                                      )
             else:
-                content = response.content
+                url = urlparse.urljoin(self._base_url, original_url)
 
-            with open(path_to_resource_file, "w") as f:
-                f.write(content)
+        elif self._mode == self.RELATIVE_MODE:
+            if is_absolute_url2(original_url):
+                parsed_original_url = urlparse.urlparse(original_url)
 
-        return relative_url
+                url_path = relurl_path(urlparse.urlparse(base_url).path, parsed_original_url.path)
+                url = urlparse.urlunparse((
+                                   "",
+                                   "",
+                                   url_path,
+                                   parsed_original_url.params,
+                                   parsed_original_url.query,
+                                   parsed_original_url.fragment))
 
-    def _on_found_url_in_css(self, internal_urls_in_css, type_of_resource, url, base_url):
-        if is_absolute_url(url):
-            if self._is_absolute_url_in_same_domain(url):
-                path_url1 = urlparse.urlparse(base_url).path
-                path_url2 = urlparse.urlparse(url).path
-
-                relative_url = relurl_path(path_url1, path_url2)                
-                absoute_url = url
+                if url[0] == "/": url = url[1:]
             else:
-                return url
+                url = original_url
         else:
-            relative_url = url
-            absoute_url = absurl(base_url, url)
+            return
 
-        internal_urls_in_css.append((type_of_resource, absoute_url))
-            
-        return relative_url
+        return url
 
-    def _create_response_css_handler(self, on_found_url_in_css):       
-        def response_css_handler(response):
-            encoding = detect_encoding_from_response(response, filetype=CSS_FILE)
 
-            if encoding is None:
-                logger.info('[ WARN ] failed to found encoding: %s'%response.url)
-                return response.content
-            else:
-                base_url = response.url
-
-                css = response.content.decode(encoding, 'strict')
-                css = handle_css_content(css, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
-                css = css.encode("utf-8")
-
-                return css
-
-        return response_css_handler
-    
-    def _apply_replacements_to_text(self, text, replacements):
-        for old, new in replacements:
-            text.replace(old, new)
-        return text
-
-    def _response_js_handler(self, response, javascript_replacements):
-        encoding = detect_encoding_from_response(response)
-        content = response.content.decode(encoding, 'strict')
-        
-        content = self._apply_replacements_to_text(content, javascript_replacements)
-        
-        content = content.encode("utf-8")
-        return content      
-
-    def save(self, url, html_replacements=None, javascript_replacements=None):
-        # It should return a list of links found in the html
-        '''
-        given a url url such as http://www.google.com, http://custom.domain/url.html
-        return saved single html
-        '''
-        
-        if not is_absolute_url(url):
-            raise Exception("URL is not absolute: %s"%url)
-
-        if self._domain is None:
-            self._domain = tldextract.extract(url).domain
-            if self._output is None:
-                self._output = os.path.join(os.getcwd(), urlparse.urlparse(url).netloc)
-        else:
-            if not self._is_absolute_url_in_same_domain(url):
-                raise Exception("URL not in the same domain: %s"%url)
-
+    def start(self):
         if os.path.exists(self._output):
             if not os.path.isdir(self._output):
                 raise Exception("It's not possible to save webpage in 'output' directory")
         else:
             os.makedirs(self._output)
 
-        parsed_url = urlparse.urlparse(url)
-        
-        base_url_path = parsed_url.path
+        i = 0
 
-        if base_url_path.endswith("/") or base_url_path == "":
-            base_url_path += "index.html"
+        while len(self._queue) != 0:
+            type_of_resource, url = self._queue.pop()
 
-        if base_url_path.startswith("/"):
-            base_url_path = base_url_path[1:]
+            path_to_resource_file = self._path_to_resource_file(url, output=self._output)
 
-        relative_path_to_html_file = os.path.join(*base_url_path.split("/"))
-        path_to_html_file = os.path.join(self._output, relative_path_to_html_file)
+            response = download_content(url)
 
-        base_url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, base_url_path, "", "", ""))
+            if response is None:
+                logger.info('[ BROKEN URL ] - %s' % url)
+                self._broken_urls.add(url)
 
-        response = download_content(url)
+                if os.path.isfile(path_to_resource_file):
+                    os.remove(path_to_resource_file)
 
-        if response is None:
-            raise Exception("Not possible to download: %s"%url)
-        
-        html = response.content
+                continue
 
-        # now build the dom tree
-        soup = BeautifulSoup(html, 'lxml')
+            content = response.content
 
-        logger.info("\nProcessing script's..")
+            base_url = url
 
-        if javascript_replacements:
-            response_js_handler = functols.partial(self._response_js_handler, javascript_replacements=javascript_replacements)
-        else:
-            response_js_handler = None
+            def url_handler(type_of_resource, url):
+                return self._on_extracted_url(type_of_resource, url, base_url)
 
-        for js in soup('script'):
-            if not js.get('src'): continue       
-            src = js['src']
-            
-            if not self._is_external_resource(src):
-                relative_src = self._save_resource_if_not_exists(src, base_url=base_url, response_handler=response_js_handler)
-                
-                src = relurl_path(base_url_path, relative_src)
+            if type_of_resource == HTML_FILE:
+                soup = BeautifulSoup(content, "html5lib")
+                html_base = soup.find("base", href=True)
 
-                js['src'] = src
+                if html_base:
+                    base_url = html_base["href"]
+                    if not is_absolute_url2(base_url):
+                        base_url = urlparse.urljoin(url, base_url)
 
-        logger.info("\nProcessing img's...")
+                encoding = detect_encoding_from_http_response(response, filetype=HTML_FILE)
 
-        for img in soup('img'):
-            if not img.get('src'): continue
-            src = img['src']
-
-            if not self._is_external_resource(src):
-                relative_src = self._save_resource_if_not_exists(src, base_url=base_url)
-                src = relurl_path(base_url_path, relative_src)
-
-                img['src'] = src
-
-        current_path = urlparse.urlparse(url).path
-
-        logger.info("\nProcessing links...")
-        for a in soup.find_all('a', href=True):
-            href = a['href'].strip()
-
-            if not href.startswith('#'):
-                href = absurl(base_url, href)
-                href = normalize_url(href)
-
-                if self._is_external_resource(href):
-                    a['href'] = href
+                content = content.decode(encoding, 'strict')
+                if self._mode == self.NO_CHANGE_MODE:
+                    process_urls_in_html_content(content, url_handler)
                 else:
-                    parsed_href = urlparse.urlparse(href)
-                    new_href_path = relurl_path(base_url_path, parsed_href.path)
-                    
-                    a['href'] = urlparse.urlunsplit(("", "", new_href_path, parsed_href.query, parsed_href.fragment))
+                    content = process_urls_in_html_content(content, url_handler)
 
-        internal_urls_in_css = []
+                content = self._replace_content(url, content)
+                content = content.encode(encoding)
 
-        logger.info("\nProcessing link elements...")
-        for link in soup('link'):
-            if link.get('href'):
-                href = link['href']
-                
-                href = absurl(base_url, href)
-                href = normalize_url(href)
+            elif type_of_resource == CSS_FILE:
+                encoding = detect_encoding_from_http_response(response, filetype=CSS_FILE)
 
-                if self._is_external_resource(href):
-                    link['href'] = href
+                content = content.decode(encoding, 'strict')
+
+                if self._mode == self.NO_CHANGE_MODE:
+                    content = process_urls_in_css_content(content, url_handler)
                 else:
-                    if (link.get('type') == 'text/css' or link['href'].lower().endswith('.css') or 'stylesheet' in (link.get('rel') or [])):
-                        internal_urls_in_css.append((CSS_FILE, href))
+                    process_urls_in_css_content(content, url_handler)
 
-                    relative_href = self._to_relative_url(href)
-                    href = relurl_path(base_url_path, relative_href)
+                content = self._replace_content(url, content)
+                content = content.encode(encoding)
 
-                    link['href'] = href
+            elif type_of_resource == JS_FILE:
+                content = self._replace_content(url, content)
 
-            else:
-                if link.has_attr('type') and link['type'] == 'text/css':
-                    if link.string:
-                        link.string = handle_css_content(link.string, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
-
-        on_found_url_in_css = functools.partial(self._on_found_url_in_css, internal_urls_in_css)
-        response_css_handler = self._create_response_css_handler(on_found_url_in_css)
-
-        logger.info("\nProcessing style elements...")
-        for style in soup.find_all('style'):
-            if style.string.strip():
-                style.string = handle_css_content(style.string, base_url=base_url, on_found_url_in_css=on_found_url_in_css)
-
-        for tag in soup(True):
-            if tag.has_attr('style'):
-                if tag['style']:
-                    tag['style'] = handle_css_content(tag['style'], base_url=base_url, on_found_url_in_css=on_found_url_in_css)
-
-        logger.info("\nProcessing internal resources found in stylesheets...")
-        while len(internal_urls_in_css) != 0:
-            type_of_resource, internal_url = internal_urls_in_css.pop()
-
-            if type_of_resource == CSS_FILE:
-                self._save_resource_if_not_exists(internal_url, response_handler=response_css_handler)
-            else:
-                self._save_resource_if_not_exists(internal_url)
-
-        html = str(soup)
-        if html_replacements:
-            self._apply_replacements_to_text(html, html_replacements)
-
-        with open(path_to_html_file, "w") as f:
-            f.write(html)
+            with open(path_to_resource_file, "w") as f:
+                f.write(content)
 
 
 def main():
@@ -613,49 +781,74 @@ def main():
     Possibility to replace javascript and html files using custom substitutions.
     Full Unicode/UTF-8 support.""")
     parser.add_argument('--version', action='version', version=__version__)
-    parser.add_argument('-q', '--quite', action='store_true', help="don't show verbose url get log in stderr")
-    parser.add_argument('--insecure', action='store_true', help="Ignore the certificate")
-    parser.add_argument('-i', '--url-list', action='store', help="Path to file containing list of url's")
+    parser.add_argument('-q', '--quite', action='store_true', default=False, help="don't show verbose url get log in stderr")
+    parser.add_argument('--insecure', action='store_true', default=False, help="Ignore the certificate")
+
+    parser.add_argument("list_of_seed_urls", nargs='*', help="Seed urls")
+    parser.add_argument("--forbidden-urls", nargs='+', help="Forbidden urls")
+    parser.add_argument('--follow-links', action='store_true', default=False, help="Follow links")
     parser.add_argument('-o', '--output', action='store', default=None, help="Output directory")
-    parser.add_argument('--javascript-replacements', action='store', default=None, help="Path to file containing javascript replacements in JSON format")
-    parser.add_argument('--html-replacements', action='store', default=None, help="Path to file containing html replacements in JSON format")
     parser.add_argument('-b', '--base-url', action='store', help="Resolves relative links using URL as the point of reference")
-    parser.add_argument("url", nargs='?', help="the website to store")
+    parser.add_argument('--default-file', action='store', default="index.html", help="Default index file")
+    parser.add_argument('--mode', action='store',  default="relative", choices=["relative", "absolute", "nochange"], help="Mode of extraction")
+    parser.add_argument('--config', action='store', dest="path_to_config_file", help="Path to configuration file")
     args = parser.parse_args()
 
     output = args.output
     base_url = args.base_url
-    
-    javascript_replacements = args.javascript_replacements
-    if javascript_replacements:
-        with open(javascript_replacements) as f:
-            javascript_replacements = json.loads(f.read())
-    
-    html_replacements = args.html_replacements
-    if html_replacements:
-        with open(html_replacements) as f:
-            html_replacements = json.loads(f.read())
+    follow_links = args.follow_links
+    forbidden_urls = args.forbidden_urls
+    list_of_seed_urls  = args.list_of_seed_urls
+    mode = args.mode
+    default_file = args.default_file
 
-    if args.url_list:
-        
-        with open(args.url_list, "r") as f:
-            url_list = [l for l in f.read().splitlines() if l.strip() != ""]
 
-        if len(url_list) != 0:
-            webpage_downloader = Webpage_Downloader(output=output)
-
-            for url in url_list:
-                webpage_downloader.save(
-                                url, 
-                                javascript_replacements=javascript_replacements,
-                                html_replacements=html_replacements)
-            
+    if mode == "relative":
+        mode = Save_Webpage.RELATIVE_MODE
+    elif mode == "absolute":
+        mode = Save_Webpage.ABSOLUTE_MODE
     else:
-        webpage_downloader = Webpage_Downloader(output=output)
-        webpage_downloader.save(
-                args.url, 
-                javascript_replacements=javascript_replacements,
-                html_replacements=html_replacements)
+        mode = Save_Webpage.NO_CHANGE_MODE
+
+    replacements = None
+
+    if args.path_to_config_file:
+        config = json.parse(args.path_to_config_file)
+        if "base_url" in config:
+            base_url = config["base_url"]
+
+        if "follow_links" in config:
+            follow_links = config["follow_links"]
+
+        if "forbidden_urls" in config:
+            forbidden_urls = config["forbidden_urls"]
+
+        if "replacements" in config:
+            replacements = config["replacements"]
+
+        if "output" in config:
+            output = config["output"]
+
+        if "list_of_seed_urls" in config:
+            list_of_seed_urls = config["list_of_seed_urls"]
+
+        if "default_file" in config:
+            default_file = config["default_file"]
+
+        if "mode" in config:
+            mode = config["mode"]
+
+
+    save_webpage = Save_Webpage(
+                            list_of_seed_urls=list_of_seed_urls,
+                            output=output,
+                            follow_links=follow_links,
+                            forbidden_urls=forbidden_urls,
+                            replacements=replacements,
+                            base_url=base_url,
+                            mode = mode,
+                            default_file=default_file)
+    save_webpage.start()
 
 if __name__ == '__main__':
     main()

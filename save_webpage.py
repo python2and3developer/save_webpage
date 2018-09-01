@@ -22,7 +22,6 @@ import datetime
 
 import chardet
 from bs4 import BeautifulSoup
-import lxml
 import requests
 import tldextract
 
@@ -514,7 +513,7 @@ class Save_Webpage(object):
     NO_CHANGE_MODE = 2
 
 
-    def __init__(self, list_of_seed_urls, forbidden_urls=None, follow_links=False, replacements=None, domain=None, output=None, base_url=None, mode=NO_CHANGE_MODE, default_file="index.html"):
+    def __init__(self, list_of_seed_urls, forbidden_urls=None, follow_links=False, replacements=None, domain=None, output="output", base_url=None, mode=NO_CHANGE_MODE, index_name="index.html"):
         if not list_of_seed_urls:
             raise Exception("List of seed url's can't be empty")
 
@@ -528,7 +527,7 @@ class Save_Webpage(object):
             if not is_absolute_url(url):
                 raise Exception("Seed URL is not absolute: %s"%url)
 
-            url = self._normalize_url(url, default_file=default_file)
+            url = self._normalize_url(url, index_name=index_name)
             path_to_resource_file = self._path_to_resource_file(url, output=output)
 
             empty_file(path_to_resource_file)
@@ -572,7 +571,7 @@ class Save_Webpage(object):
                 raise Exception("Base URL is require to convert all url's to absolute")
 
         self._base_url = base_url
-        self._default_file = default_file
+        self._index_name = index_name
         self._replacements = replacements
 
     def _is_absolute_url_in_same_domain(self, url):
@@ -584,22 +583,22 @@ class Save_Webpage(object):
         else:
             return False
 
-    # Esta parte require revision
+
     @staticmethod
-    def _normalize_url(url, default_file="index.html"):
+    def _normalize_url(url, index_name="index.html"):
         if url.startswith("//"):
             url = "http:" + url
 
         parsed_url = urlparse.urlparse(url)
 
         if parsed_url.path.endswith("/") or parsed_url.path == "":
-            url_path = parsed_url.path + default_file
+            url_path = parsed_url.path + index_name
         else:
             url_path = parsed_url.path
 
-        url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, url_path, "", "", ""))
+        url_path = urllib.quote(url_path, safe="%/:=&?~#+!$,;'@()*[]")
 
-        url = urllib.quote(url, safe="%/:=&?~#+!$,;'@()*[]")
+        url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, url_path, "", "", ""))
         url = urltools.normalize(url)
 
         return url
@@ -643,7 +642,7 @@ class Save_Webpage(object):
         if base_url is not None:
             url = absurl(base_url, url)
 
-        url = self._normalize_url(url, default_file=self._default_file)
+        url = self._normalize_url(url, index_name=self._index_name)
 
         if self._is_external_resource(url): return
         if self._forbidden_urls and url in self._forbidden_urls: return
@@ -701,7 +700,7 @@ class Save_Webpage(object):
         return url
 
 
-    def start(self):
+    def run(self):
         if os.path.exists(self._output):
             if not os.path.isdir(self._output):
                 raise Exception("It's not possible to save webpage in 'output' directory")
@@ -785,11 +784,11 @@ def main():
     parser.add_argument('--insecure', action='store_true', default=False, help="Ignore the certificate")
 
     parser.add_argument("list_of_seed_urls", nargs='*', help="Seed urls")
+    parser.add_argument('output', action='store', help="Output directory")
     parser.add_argument("--forbidden-urls", nargs='+', help="Forbidden urls")
     parser.add_argument('--follow-links', action='store_true', default=False, help="Follow links")
-    parser.add_argument('-o', '--output', action='store', default=None, help="Output directory")
     parser.add_argument('-b', '--base-url', action='store', help="Resolves relative links using URL as the point of reference")
-    parser.add_argument('--default-file', action='store', default="index.html", help="Default index file")
+    parser.add_argument('--index-name', action='store', default="index.html", help="Default index file")
     parser.add_argument('--mode', action='store',  default="relative", choices=["relative", "absolute", "nochange"], help="Mode of extraction")
     parser.add_argument('--config', action='store', dest="path_to_config_file", help="Path to configuration file")
     args = parser.parse_args()
@@ -800,7 +799,7 @@ def main():
     forbidden_urls = args.forbidden_urls
     list_of_seed_urls  = args.list_of_seed_urls
     mode = args.mode
-    default_file = args.default_file
+    index_name = args.index_name
 
 
     if mode == "relative":
@@ -832,8 +831,8 @@ def main():
         if "list_of_seed_urls" in config:
             list_of_seed_urls = config["list_of_seed_urls"]
 
-        if "default_file" in config:
-            default_file = config["default_file"]
+        if "index_name" in config:
+            index_name = config["index_name"]
 
         if "mode" in config:
             mode = config["mode"]
@@ -847,8 +846,8 @@ def main():
                             replacements=replacements,
                             base_url=base_url,
                             mode = mode,
-                            default_file=default_file)
-    save_webpage.start()
+                            index_name=index_name)
+    save_webpage.run()
 
 if __name__ == '__main__':
     main()

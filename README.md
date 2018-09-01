@@ -1,35 +1,38 @@
 # save_webpage
 
 ```
-usage: save_webpage.py [-h] [--version] [-q] [--insecure] [-i URL_LIST]
-                       [-o OUTPUT]
-                       [--javascript-replacements JAVASCRIPT_REPLACEMENTS]
-                       [--html-replacements HTML_REPLACEMENTS] [-b BASE_URL]
-                       [url]
+usage: save_webpage.py [-h] [--version] [-q] [--insecure]
+                       [--forbidden-urls FORBIDDEN_URLS [FORBIDDEN_URLS ...]]
+                       [--follow-links] [-b BASE_URL]
+                       [--index-name INDEX_NAME]
+                       [--mode {relative,absolute,nochange}]
+                       [--config PATH_TO_CONFIG_FILE]
+                       [list_of_seed_urls [list_of_seed_urls ...]] output
 
-SAVE_WEBPAGE Save a webpage and all its resource.
+Save_Webpage Save webpages and all its resources. Apply search and replace of
+matched strings.
 
 positional arguments:
-  url                   the website to store
+  list_of_seed_urls     Seed urls
+  output                Output directory
 
 optional arguments:
   -h, --help            show this help message and exit
   --version             show program's version number and exit
   -q, --quite           don't show verbose url get log in stderr
   --insecure            Ignore the certificate
-  -i URL_LIST, --url-list URL_LIST
-                        Path to file containing list of url's
-  -o OUTPUT, --output OUTPUT
-                        Output directory
-  --javascript-replacements JAVASCRIPT_REPLACEMENTS
-                        Path to file containing javascript replacements in
-                        JSON format
-  --html-replacements HTML_REPLACEMENTS
-                        Path to file containing html replacements in JSON
-                        format
+  --forbidden-urls FORBIDDEN_URLS [FORBIDDEN_URLS ...]
+                        Forbidden urls
+  --follow-links        Follow links
   -b BASE_URL, --base-url BASE_URL
                         Resolves relative links using URL as the point of
                         reference
+  --index-name INDEX_NAME
+                        Default index file
+  --mode {relative,absolute,nochange}
+                        Mode of extraction
+  --config PATH_TO_CONFIG_FILE
+                        Path to configuration file
 
 save_webpage.py: Takes a url and extracts that website with all its internal
 resource files. Transforms all internal resources so that they link to local

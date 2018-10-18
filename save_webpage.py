@@ -373,7 +373,7 @@ def resource_type_using_extension(url):
         return None
 
 
-def process_urls_in_css_content(content, url_handler, replace=True):
+def process_urls_in_css_content(content, resource_handler, replace=True):
     # Watch out! how to handle urls which contain parentheses inside? Oh god, css does not support such kind of urls
     # I tested such url in css, and, unfortunately, the css rule is broken. LOL!
     # I have to say that, CSS is awesome!
@@ -395,7 +395,7 @@ def process_urls_in_css_content(content, url_handler, replace=True):
             logger.warn("Unknown resource "+ matched_data)
             return 'url('+matched_data+')'
         else:
-            new_src = url_handler(type_of_resource, src)
+            new_src = resource_handler(type_of_resource, src)
 
             if new_src:
                 return 'url('+ new_src + ')'
@@ -407,7 +407,7 @@ def process_urls_in_css_content(content, url_handler, replace=True):
     return content
 
 
-def process_urls_in_html_content(content, url_handler, replace=True):
+def process_urls_in_html_content(content, resource_handler, replace=True):
     # now build the dom tree
     soup = BeautifulSoup(content, "html5lib")
 
@@ -426,16 +426,16 @@ def process_urls_in_html_content(content, url_handler, replace=True):
                 href = link['href']
 
                 if (link.get('type') == 'text/css' or link['href'].lower().endswith('.css') or 'stylesheet' in (link.get('rel') or [])):
-                    href = url_handler(CSS_FILE, href)
+                    href = resource_handler(CSS_FILE, href)
                 else:
-                    href = url_handler(OTHER_RESOURCE, href)
+                    href = resource_handler(OTHER_RESOURCE, href)
 
                 if href:
                     link['href'] = href
         elif tag_name == "style":
             for style in list_of_tags:
                 if style.string.strip():
-                    style.string = process_urls_in_css_content(style.string, url_handler=url_handler)
+                    style.string = process_urls_in_css_content(style.string, resource_handler=resource_handler)
 
         else:
             for tag in list_of_tags:
@@ -470,7 +470,7 @@ def process_urls_in_html_content(content, url_handler, replace=True):
                                     descriptor = ""
                                     url = url_and_descriptor
 
-                                new_url = url_handler(type_of_resource, url)
+                                new_url = resource_handler(type_of_resource, url)
                                 if new_url:
                                     list_of_new_urls_and_descriptors.append(new_url + descriptor)
                                     is_srcset_modified = True
@@ -482,7 +482,7 @@ def process_urls_in_html_content(content, url_handler, replace=True):
                         else:
 
                             url = tag[attribute_name]
-                            url = url_handler(type_of_resource, url)
+                            url = resource_handler(type_of_resource, url)
 
                             if url:
                                 tag[attribute_name] = url
@@ -492,9 +492,9 @@ def process_urls_in_html_content(content, url_handler, replace=True):
             style = tag['style'].strip()
 
             if style:
-                tag['style'] = process_urls_in_css_content(style, url_handler=url_handler)
+                tag['style'] = process_urls_in_css_content(style, resource_handler=resource_handler)
 
-    return unicode(soup)
+    return soup.decode(formatter="html")
 
 
 def empty_file(file_path):
@@ -513,7 +513,7 @@ class Save_Webpage(object):
     NO_CHANGE_MODE = 2
 
 
-    def __init__(self, list_of_seed_urls, forbidden_urls=None, follow_links=False, replacements=None, domain=None, output="output", base_url=None, mode=NO_CHANGE_MODE, index_name="index.html"):
+    def __init__(self, list_of_seed_urls, forbidden_urls=None, follow_links=False, replacements=None, domain=None, output="output", base_url=None, mode=NO_CHANGE_MODE, index_html="index.html"):
         if not list_of_seed_urls:
             raise Exception("List of seed url's can't be empty")
 
@@ -527,8 +527,8 @@ class Save_Webpage(object):
             if not is_absolute_url(url):
                 raise Exception("Seed URL is not absolute: %s"%url)
 
-            url = self._normalize_url(url, index_name=index_name)
-            path_to_resource_file = self._path_to_resource_file(url, output=output)
+            url = self._normalize_url(url)
+            path_to_resource_file = self._path_to_resource_file(url, output=output, index_html=index_html)
 
             empty_file(path_to_resource_file)
 
@@ -571,7 +571,7 @@ class Save_Webpage(object):
                 raise Exception("Base URL is require to convert all url's to absolute")
 
         self._base_url = base_url
-        self._index_name = index_name
+        self._index_html = index_html
         self._replacements = replacements
 
     def _is_absolute_url_in_same_domain(self, url):
@@ -585,17 +585,13 @@ class Save_Webpage(object):
 
 
     @staticmethod
-    def _normalize_url(url, index_name="index.html"):
+    def _normalize_url(url):
         if url.startswith("//"):
             url = "http:" + url
 
         parsed_url = urlparse.urlparse(url)
 
-        if parsed_url.path.endswith("/") or parsed_url.path == "":
-            url_path = parsed_url.path + index_name
-        else:
-            url_path = parsed_url.path
-
+        url_path = parsed_url.path
         url_path = urllib.quote(url_path, safe="%/:=&?~#+!$,;'@()*[]")
 
         url = urlparse.urlunparse((parsed_url.scheme, parsed_url.netloc, url_path, "", "", ""))
@@ -604,12 +600,16 @@ class Save_Webpage(object):
         return url
 
     @staticmethod
-    def _path_to_resource_file(url, output):
+    def _path_to_resource_file(url, output, index_html):
         parsed_url = urlparse.urlparse(url)
         url_path = parsed_url.path
+        url_path = url_path.lstrip("/")
 
-        if url_path.startswith("/"):
-            url_path = url_path[1:]
+        if url_path == "":
+            url_path = index_html
+        else:
+            if url_path.endswith("/"):
+                url_path += index_html
 
         relative_path_to_resource_file = urllib.url2pathname(url_path)
         path_to_resource_file = os.path.join(output, relative_path_to_resource_file)
@@ -642,7 +642,7 @@ class Save_Webpage(object):
         if base_url is not None:
             url = absurl(base_url, url)
 
-        url = self._normalize_url(url, index_name=self._index_name)
+        url = self._normalize_url(url)
 
         if self._is_external_resource(url): return
         if self._forbidden_urls and url in self._forbidden_urls: return
@@ -652,7 +652,7 @@ class Save_Webpage(object):
             return
 
 
-        path_to_resource_file = self._path_to_resource_file(url, output=self._output)
+        path_to_resource_file = self._path_to_resource_file(url, output=self._output, index_html=self._index_html)
 
         if os.path.isfile(path_to_resource_file):
             logger.info('[ CACHE HIT ] - %s' % url)
@@ -712,7 +712,7 @@ class Save_Webpage(object):
         while len(self._queue) != 0:
             type_of_resource, url = self._queue.pop()
 
-            path_to_resource_file = self._path_to_resource_file(url, output=self._output)
+            path_to_resource_file = self._path_to_resource_file(url, output=self._output, index_html=self._index_html)
 
             response = download_content(url)
 
@@ -727,11 +727,6 @@ class Save_Webpage(object):
 
             content = response.content
 
-            base_url = url
-
-            def url_handler(type_of_resource, url):
-                return self._on_extracted_url(type_of_resource, url, base_url)
-
             if type_of_resource == HTML_FILE:
                 soup = BeautifulSoup(content, "html5lib")
                 html_base = soup.find("base", href=True)
@@ -740,27 +735,35 @@ class Save_Webpage(object):
                     base_url = html_base["href"]
                     if not is_absolute_url2(base_url):
                         base_url = urlparse.urljoin(url, base_url)
+                else:
+                    base_url = url
+
+                resource_handler = functools.partial(self._on_extracted_url, base_url=base_url)
 
                 encoding = detect_encoding_from_http_response(response, filetype=HTML_FILE)
 
                 content = content.decode(encoding, 'strict')
+
                 if self._mode == self.NO_CHANGE_MODE:
-                    process_urls_in_html_content(content, url_handler)
+                    process_urls_in_html_content(content, resource_handler)
                 else:
-                    content = process_urls_in_html_content(content, url_handler)
+                    content = process_urls_in_html_content(content, resource_handler)
 
                 content = self._replace_content(url, content)
-                content = content.encode(encoding)
+
+                content = content.encode("utf-8")
 
             elif type_of_resource == CSS_FILE:
+                resource_handler = functools.partial(self._on_extracted_url, base_url=url)
+
                 encoding = detect_encoding_from_http_response(response, filetype=CSS_FILE)
 
                 content = content.decode(encoding, 'strict')
 
                 if self._mode == self.NO_CHANGE_MODE:
-                    content = process_urls_in_css_content(content, url_handler)
+                    content = process_urls_in_css_content(content, resource_handler)
                 else:
-                    process_urls_in_css_content(content, url_handler)
+                    process_urls_in_css_content(content, resource_handler)
 
                 content = self._replace_content(url, content)
                 content = content.encode(encoding)
@@ -774,33 +777,33 @@ class Save_Webpage(object):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog="""save_webpage.py:
-    Takes a url and extracts that website with all its internal resource files.
+    Takes a list of url's and download the websites with all its internal resource files.
     Transforms all internal resources so that they link to local files.
     Process css files exctracting new resource and converting url's.
     Possibility to replace javascript and html files using custom substitutions.
     Full Unicode/UTF-8 support.""")
+
+    parser.add_argument("list_of_seed_urls", nargs='+', help="Seed urls")
+    parser.add_argument('-o', '--output', default="output", action='store', help="Output directory")
     parser.add_argument('--version', action='version', version=__version__)
     parser.add_argument('-q', '--quite', action='store_true', default=False, help="don't show verbose url get log in stderr")
     parser.add_argument('--insecure', action='store_true', default=False, help="Ignore the certificate")
-
-    parser.add_argument("list_of_seed_urls", nargs='*', help="Seed urls")
-    parser.add_argument('output', action='store', help="Output directory")
     parser.add_argument("--forbidden-urls", nargs='+', help="Forbidden urls")
     parser.add_argument('--follow-links', action='store_true', default=False, help="Follow links")
     parser.add_argument('-b', '--base-url', action='store', help="Resolves relative links using URL as the point of reference")
-    parser.add_argument('--index-name', action='store', default="index.html", help="Default index file")
+    parser.add_argument('--index-html', action='store', default="index.html", help="Default index file")
     parser.add_argument('--mode', action='store',  default="relative", choices=["relative", "absolute", "nochange"], help="Mode of extraction")
     parser.add_argument('--config', action='store', dest="path_to_config_file", help="Path to configuration file")
     args = parser.parse_args()
 
+
+    list_of_seed_urls  = args.list_of_seed_urls
     output = args.output
     base_url = args.base_url
     follow_links = args.follow_links
     forbidden_urls = args.forbidden_urls
-    list_of_seed_urls  = args.list_of_seed_urls
     mode = args.mode
-    index_name = args.index_name
-
+    index_html = args.index_html
 
     if mode == "relative":
         mode = Save_Webpage.RELATIVE_MODE
@@ -831,8 +834,8 @@ def main():
         if "list_of_seed_urls" in config:
             list_of_seed_urls = config["list_of_seed_urls"]
 
-        if "index_name" in config:
-            index_name = config["index_name"]
+        if "index_html" in config:
+            index_html = config["index_html"]
 
         if "mode" in config:
             mode = config["mode"]
@@ -846,7 +849,7 @@ def main():
                             replacements=replacements,
                             base_url=base_url,
                             mode = mode,
-                            index_name=index_name)
+                            index_html=index_html)
     save_webpage.run()
 
 if __name__ == '__main__':
